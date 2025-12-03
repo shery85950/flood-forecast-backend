@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -48,8 +49,17 @@ public class WeatherDataService {
                     .bodyToMono(String.class)
                     .block();
             
+            // Check if response contains an error
+            if (response.contains("\"error\"")) {
+                logger.error("Weather API error response for region {}: {}", region, response);
+                throw new RuntimeException("Weather API returned error for region: " + region);
+            }
+            
             return extractWeatherData(response, region);
             
+        } catch (WebClientResponseException e) {
+            logger.error("HTTP Error {} fetching weather data for region: {}", e.getStatusCode(), region, e);
+            throw new RuntimeException("Failed to fetch weather data for " + region + " (HTTP " + e.getStatusCode() + ")", e);
         } catch (Exception e) {
             logger.error("Error fetching weather data for region: {}", region, e);
             throw new RuntimeException("Failed to fetch weather data for " + region, e);
@@ -63,8 +73,16 @@ public class WeatherDataService {
         try {
             logger.info("Fetching location forecast for: {}", location);
             
+            // Trim and validate input
+            String cleanLocation = location.trim();
+            if (cleanLocation.isEmpty()) {
+                throw new RuntimeException("Location cannot be empty");
+            }
+            
             String url = String.format("%s/forecast.json?key=%s&q=%s&days=7&aqi=no&alerts=no",
-                    apiUrl, apiKey, location);
+                    apiUrl, apiKey, cleanLocation);
+            
+            logger.debug("Weather API URL: {} (location: {})", apiUrl, cleanLocation);
             
             String response = webClient.get()
                     .uri(url)
@@ -72,11 +90,35 @@ public class WeatherDataService {
                     .bodyToMono(String.class)
                     .block();
             
-            return extractWeatherData(response, location);
+            logger.debug("Weather API response length: {}", response != null ? response.length() : "null");
             
+            // Check if response contains an error
+            if (response == null || response.isEmpty()) {
+                throw new RuntimeException("Empty response from weather API for location: " + cleanLocation);
+            }
+            
+            if (response.contains("\"error\"")) {
+                // Try to extract error message
+                try {
+                    JsonNode errorNode = objectMapper.readTree(response).path("error");
+                    String errorMsg = errorNode.path("message").asText("Unknown error");
+                    logger.error("Weather API error for location {}: {}", cleanLocation, errorMsg);
+                    throw new RuntimeException("Weather API error: " + errorMsg);
+                } catch (Exception e) {
+                    logger.error("Weather API returned error for location: {}", cleanLocation, e);
+                    throw new RuntimeException("Weather API error for location: " + cleanLocation);
+                }
+            }
+            
+            return extractWeatherData(response, cleanLocation);
+            
+        } catch (WebClientResponseException e) {
+            logger.error("HTTP Error {} fetching weather data for location: {}", e.getStatusCode(), location, e);
+            logger.error("Response body: {}", e.getResponseBodyAsString());
+            throw new RuntimeException("Failed to fetch weather data for " + location + " (HTTP " + e.getStatusCode() + "): " + e.getResponseBodyAsString(), e);
         } catch (Exception e) {
             logger.error("Error fetching weather data for location: {}", location, e);
-            throw new RuntimeException("Failed to fetch weather data for " + location, e);
+            throw new RuntimeException("Failed to fetch weather data for " + location + ": " + e.getMessage(), e);
         }
     }
     
@@ -87,6 +129,10 @@ public class WeatherDataService {
         try {
             JsonNode root = objectMapper.readTree(jsonResponse);
             JsonNode forecastDays = root.path("forecast").path("forecastday");
+            
+            if (forecastDays == null || !forecastDays.isArray() || forecastDays.size() == 0) {
+                throw new RuntimeException("Invalid forecast data structure for region: " + region);
+            }
             
             List<DailyForecast> dailyForecasts = new ArrayList<>();
             double totalRainfall = 0.0;
@@ -130,8 +176,8 @@ public class WeatherDataService {
             return weatherData;
             
         } catch (Exception e) {
-            logger.error("Error parsing weather data", e);
-            throw new RuntimeException("Failed to parse weather data", e);
+            logger.error("Error parsing weather data for region: {}", region, e);
+            throw new RuntimeException("Failed to parse weather data for " + region, e);
         }
     }
 }
