@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -51,6 +52,7 @@ public class GrokAiService {
             
         } catch (Exception e) {
             logger.error("Error analyzing flood risk for region: {}", region, e);
+            logger.error("Full error message: {}", e.getMessage());
             // Return a default assessment on error
             return createDefaultAssessment();
         }
@@ -100,6 +102,10 @@ public class GrokAiService {
      */
     private String callGrokApi(String prompt) {
         try {
+            logger.debug("Grok API Key configured: {}", apiKey != null && !apiKey.isEmpty());
+            logger.debug("Grok API URL: {}", apiUrl);
+            logger.debug("Grok Model: {}", model);
+            
             Map<String, Object> requestBody = new HashMap<>();
             requestBody.put("model", model);
             
@@ -120,17 +126,50 @@ public class GrokAiService {
                     .bodyToMono(String.class)
                     .block();
             
+            logger.debug("Grok API response received, length: {}", response != null ? response.length() : "null");
+            
+            if (response == null || response.isEmpty()) {
+                throw new RuntimeException("Empty response from Grok AI API");
+            }
+            
+            // Check for error in response
+            if (response.contains("\"error\"")) {
+                logger.error("Grok API error response: {}", response);
+                try {
+                    JsonNode errorNode = objectMapper.readTree(response).path("error");
+                    String errorMsg = errorNode.path("message").asText("Unknown error");
+                    throw new RuntimeException("Grok API error: " + errorMsg);
+                } catch (Exception e) {
+                    throw new RuntimeException("Grok API returned error: " + response);
+                }
+            }
+            
             // Extract the content from the response
             JsonNode root = objectMapper.readTree(response);
-            String content = root.path("choices").get(0).path("message").path("content").asText();
+            JsonNode choicesNode = root.path("choices");
+            
+            if (!choicesNode.isArray() || choicesNode.size() == 0) {
+                logger.error("Invalid Grok API response structure. Response: {}", response);
+                throw new RuntimeException("Grok API response missing 'choices' array");
+            }
+            
+            String content = choicesNode.get(0).path("message").path("content").asText();
+            
+            if (content == null || content.isEmpty()) {
+                logger.error("Grok API returned empty content. Response: {}", response);
+                throw new RuntimeException("Grok API returned empty content");
+            }
             
             logger.info("Received AI response: {}", content.substring(0, Math.min(100, content.length())));
             
             return content;
             
+        } catch (WebClientResponseException e) {
+            logger.error("HTTP Error {} calling Grok AI API: {}", e.getStatusCode(), e.getResponseBodyAsString());
+            throw new RuntimeException("Grok AI API HTTP " + e.getStatusCode() + ": " + e.getResponseBodyAsString(), e);
         } catch (Exception e) {
-            logger.error("Error calling Grok AI API", e);
-            throw new RuntimeException("Failed to call Grok AI API", e);
+            logger.error("Error calling Grok AI API: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to call Grok AI API: " + e.getMessage(), e);
         }
     }
     
@@ -168,7 +207,7 @@ public class GrokAiService {
             return assessment;
             
         } catch (Exception e) {
-            logger.error("Error parsing AI response", e);
+            logger.error("Error parsing AI response: {}", e.getMessage(), e);
             return createDefaultAssessment();
         }
     }
